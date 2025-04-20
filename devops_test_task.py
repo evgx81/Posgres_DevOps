@@ -26,6 +26,11 @@ class OsType(Enum):
 #     eprint(f"Не удалось подключиться к серверу {host}: {e}")
 #     os_type_host = OsType.UNKNOWN
 
+#     commands = [
+#     "find / -type f -name postgresql.conf",
+#     """sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/g" /etc/postgresql/15/main/postgresql.conf""",
+# ]
+
 
 # Функция для вывода в stderr
 def eprint(*args, **kwargs):
@@ -41,14 +46,23 @@ def prepare_parser():
     return parser
 
 
+def exec_ssh_command(client: paramiko.SSHClient, command: str) -> tuple[int, str, str]:
+    """Функция для выполнения команды на сервере"""
+
+    _, stdout, stderr = client.exec_command(command, get_pty=True)
+    exit_status = stdout.channel.recv_exit_status()
+    output = stdout.read().decode().strip()
+    error = stderr.read().decode().strip()
+    return exit_status, output, error
+
+
 def get_cpu_load(client: paramiko.SSHClient, host: str) -> float:
     """Функция для получения загруженности сервера"""
     print(f"Определяем загруженность сервера {host}...")
     try:
-        stdin, stdout, stderr = client.exec_command(
-            "top -bn1 | grep 'Cpu(s)' | awk '{print $2}'"
+        _, output, _ = exec_ssh_command(
+            client, "top -bn1 | grep 'Cpu(s)' | awk '{print $2}'"
         )
-        output = stdout.read().decode()
         cpu_load = float(output)
         print(f"Загруженность сервера {host}: {cpu_load}")
         return cpu_load
@@ -64,8 +78,7 @@ def detect_os_type(client: paramiko.SSHClient, host: str) -> OsType:
 
     print(f"Определяем тип операционной системы на сервере {host}...")
     try:
-        stdin, stdout, stderr = client.exec_command("cat /etc/os-release")
-        output = stdout.read().decode()
+        _, output, _ = exec_ssh_command(client, "cat /etc/os-release")
         if "AlmaLinux" in output:
             return OsType.ALMA
         elif "Debian" in output:
@@ -104,16 +117,86 @@ def install_postgresql(client: paramiko.SSHClient, host: str, os_type: OsType):
         return
     for command in commands:
         print(f"Выполняем команду: {command}...")
-        stdin, stdout, stderr = client.exec_command(command, get_pty=True)
-        output = stdout.read().decode()
+        exit_status, output, error = exec_ssh_command(client, command)
         if output:
             print(output)
-        error = stderr.read().decode()
-        if error:
+        if exit_status != 0:
             eprint(f"Ошибка при установке PostgreSQL на сервере {host}: {error}")
             return
 
     print(f"PostgreSQL успешно установлен на сервере {host}")
+
+
+def open_external_connections_postgresql(
+    client: paramiko.SSHClient, host: str, os_type: OsType
+):
+    """Функция настройки PostgreSQL для приёма внешних соединений"""
+
+    print(
+        f"Настраиваем приём внешних соединений PostgreSQL на сервере {host} ({os_type.value})..."
+    )
+
+    # Ищем файл postgresql.conf
+    command = "find / -type f -name postgresql.conf"
+    exit_status, output, error = exec_ssh_command(client, command)
+
+    if exit_status != 0:
+        eprint(
+            f"Ошибка при поиске файла postgresql.conf на сервере {host}: {error}"
+        )
+        return
+
+    pg_conf_path = output
+
+    # Изменяем файл postgresql.conf для приёма внешних соединений
+    command = f"""sed -i "s/#listen_addresses = 'localhost'/listen_addresses = '*'/g" {pg_conf_path}"""
+    exit_status, output, error = exec_ssh_command(client, command)
+
+    if exit_status != 0:
+        eprint(
+            f"Ошибка при изменении файла postgresql.conf на сервере {host}: {error}"
+        )
+        return
+
+    # Ищем файл pg_hba.conf
+    command = "find / -type f -name pg_hba.conf"
+    exit_status, output, error = exec_ssh_command(client, command)
+
+    if exit_status != 0:
+        eprint(
+            f"Ошибка при поиске файла pg_hba.conf на сервере {host}: {error}"
+        )
+        return
+
+    pg_hba_path = output
+
+    # Изменяем файл pg_hba.conf для приёма внешних соединений
+    lines_to_add = [
+        "host    all             all             0.0.0.0/0               trust",
+        "host    all             all             ::0/0                   trust",
+    ]
+
+    for line in lines_to_add:
+        command = f"echo {line} | tee -a {pg_hba_path} > /dev/null"
+        exit_status, output, error = exec_ssh_command(client, command)
+
+        if exit_status != 0:
+            eprint(
+                f"Ошибка при изменении файла pg_hba.conf на сервере {host}: {error}"
+            )
+            return
+        
+    # Перезагружаем сервер PostgreSQL
+    command = "systemctl restart postgresql"
+    exit_status, output, error = exec_ssh_command(client, command)
+
+    if exit_status != 0:
+        eprint(
+            f"Ошибка при перезапуске демона PostgreSQL на сервере {host}: {error}"
+        )
+        return
+
+    print(f"Приём внешних соединений PostgreSQL успешно установлен на сервере {host}")
 
 
 def main():
@@ -151,9 +234,14 @@ def main():
     if not servers_info:
         eprint("Нет доступных серверов для установки PostgreSQL")
         return
-    
+
     # Отбираем только серверы с поддерживаемой ОС
-    valid_servers = {host: server_info for host, server_info in servers_info.items() if server_info["os_type"] != OsType.UNKNOWN and server_info["cpu_load"] != float("inf")}
+    valid_servers = {
+        host: server_info
+        for host, server_info in servers_info.items()
+        if server_info["os_type"] != OsType.UNKNOWN
+        and server_info["cpu_load"] != float("inf")
+    }
 
     # Выбираем наименнее загруженный сервер
     min_load_host = min(valid_servers.items(), key=lambda x: x[1]["cpu_load"])
@@ -161,7 +249,14 @@ def main():
     print(min_load_host)
 
     # Устанавливаем PostgreSQL на сервер
-    install_postgresql(min_load_host[1]["ssh_client"], min_load_host[0], min_load_host[1]["os_type"])
+    install_postgresql(
+        min_load_host[1]["ssh_client"], min_load_host[0], min_load_host[1]["os_type"]
+    )
+
+    # Настраиваем PostgreSQL целевого хоста для приема внешних соединений
+    open_external_connections_postgresql(
+        min_load_host[1]["ssh_client"], min_load_host[0], min_load_host[1]["os_type"]
+    )
 
     # Закрываем соединение с сервером
     for host, server_info in servers_info.items():
