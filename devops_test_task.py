@@ -106,7 +106,7 @@ def install_postgresql(client: paramiko.SSHClient, host: str, os_type: OsType):
             "dnf update -y",
             "dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm",
             "dnf install -y postgresql17-server",
-            "/usr/pgsql-17/bin/postgresql-17-setup initdb",
+            # "/usr/pgsql-17/bin/postgresql-17-setup initdb",
             "systemctl enable postgresql-17",
             "systemctl start postgresql-17",
         ]
@@ -141,9 +141,7 @@ def open_external_connections_postgresql(
     exit_status, output, error = exec_ssh_command(client, command)
 
     if exit_status != 0:
-        eprint(
-            f"Ошибка при поиске файла postgresql.conf на сервере {host}: {error}"
-        )
+        eprint(f"Ошибка при поиске файла postgresql.conf на сервере {host}: {error}")
         return
 
     pg_conf_path = output
@@ -153,9 +151,7 @@ def open_external_connections_postgresql(
     exit_status, output, error = exec_ssh_command(client, command)
 
     if exit_status != 0:
-        eprint(
-            f"Ошибка при изменении файла postgresql.conf на сервере {host}: {error}"
-        )
+        eprint(f"Ошибка при изменении файла postgresql.conf на сервере {host}: {error}")
         return
 
     # Ищем файл pg_hba.conf
@@ -163,9 +159,7 @@ def open_external_connections_postgresql(
     exit_status, output, error = exec_ssh_command(client, command)
 
     if exit_status != 0:
-        eprint(
-            f"Ошибка при поиске файла pg_hba.conf на сервере {host}: {error}"
-        )
+        eprint(f"Ошибка при поиске файла pg_hba.conf на сервере {host}: {error}")
         return
 
     pg_hba_path = output
@@ -181,22 +175,100 @@ def open_external_connections_postgresql(
         exit_status, output, error = exec_ssh_command(client, command)
 
         if exit_status != 0:
-            eprint(
-                f"Ошибка при изменении файла pg_hba.conf на сервере {host}: {error}"
-            )
+            eprint(f"Ошибка при изменении файла pg_hba.conf на сервере {host}: {error}")
             return
-        
+
     # Перезагружаем сервер PostgreSQL
     command = "systemctl restart postgresql"
     exit_status, output, error = exec_ssh_command(client, command)
 
     if exit_status != 0:
-        eprint(
-            f"Ошибка при перезапуске демона PostgreSQL на сервере {host}: {error}"
-        )
+        eprint(f"Ошибка при перезапуске демона PostgreSQL на сервере {host}: {error}")
         return
 
     print(f"Приём внешних соединений PostgreSQL успешно установлен на сервере {host}")
+
+
+def configure_postgresql_student_user(
+    client: paramiko.SSHClient, host: str, os_type: OsType
+) -> None:
+    """Функция настройки подключения пользователя "student" к PostgreSQL"""
+    print(
+        f"""Настраиваем подключения пользователя "student" к PostgreSQL на сервере {host} ({os_type.value})..."""
+    )
+
+    # Ищем файл pg_hba.conf
+    command = "find / -type f -name pg_hba.conf"
+    exit_status, output, error = exec_ssh_command(client, command)
+
+    if exit_status != 0:
+        eprint(f"Ошибка при поиске файла pg_hba.conf на сервере {host}: {error}")
+        return
+
+    pg_hba_path = output
+
+    # Изменяем файл pg_hba.conf для подключения пользователя "student"
+    lines_to_add = [
+        f"host    all             student         {host}            scram-sha-256",
+        "host    all             student         all                     reject",
+    ]
+
+    for line in lines_to_add:
+        command = f"echo {line} | tee -a {pg_hba_path} > /dev/null"
+        exit_status, output, error = exec_ssh_command(client, command)
+
+        if exit_status != 0:
+            eprint(f"Ошибка при изменении файла pg_hba.conf на сервере {host}: {error}")
+            return
+
+    pg_hba_path = output
+
+    # Проверяем наличие пользователя 'student'
+    command = """sudo -i -u postgres psql -c "SELECT 1 FROM pg_roles WHERE rolname='student';"""
+    exit_status, output, error = exec_ssh_command(client, command)
+
+    if exit_status != 0:
+        eprint(
+            f"Ошибка при проверке наличия пользователя 'student' на сервере {host}: {error}"
+        )
+        return
+
+    user_student_exists = "0 rows" not in output
+
+    if user_student_exists:
+        print(
+            f"""Подключение пользователя "student" к PostgreSQL успешно установлено на сервере {host}"""
+        )
+        return
+
+    # Создаем пользователя 'student'
+    command = (
+        """sudo -i -u postgres psql -c "CREATE USER student WITH PASSWORD 'student';"""
+    )
+    exit_status, output, error = exec_ssh_command(client, command)
+
+    if exit_status != 0:
+        eprint(f"Ошибка создания пользователя 'student' на сервере {host}: {error}")
+        return
+
+    # Даем все права пользователю на базу данных 'postgres'
+    command = """sudo -i -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE postgres TO student;"""
+    exit_status, output, error = exec_ssh_command(client, command)
+
+    if exit_status != 0:
+        eprint(f"Ошибка при определении прав пользователя 'student' на базу данных 'postgres' на сервере {host}: {error}")
+        return
+
+
+    # Перезагружаем сервер PostgreSQL
+    command = "systemctl restart postgresql"
+    exit_status, output, error = exec_ssh_command(client, command)
+
+    if exit_status != 0:
+        eprint(f"Ошибка при перезапуске демона PostgreSQL на сервере {host}: {error}")
+        return
+
+    print(f"Подключение пользователя 'student' к PostgreSQL успешно установлено на сервере {host}")
 
 
 def main():
@@ -257,6 +329,14 @@ def main():
     open_external_connections_postgresql(
         min_load_host[1]["ssh_client"], min_load_host[0], min_load_host[1]["os_type"]
     )
+
+    # Выполняем настройку подключения пользователя “student” к PostgreSql только с ip адреса второго сервера
+    if min_load_host[1]["os_type"] == OsType.ALMA:
+        configure_postgresql_student_user(
+            min_load_host[1]["ssh_client"],
+            min_load_host[0],
+            min_load_host[1]["os_type"],
+        )
 
     # Закрываем соединение с сервером
     for host, server_info in servers_info.items():
