@@ -106,7 +106,7 @@ def install_postgresql(client: paramiko.SSHClient, host: str, os_type: OsType):
             "dnf update -y",
             "dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-9-x86_64/pgdg-redhat-repo-latest.noarch.rpm",
             "dnf install -y postgresql17-server",
-            # "/usr/pgsql-17/bin/postgresql-17-setup initdb",
+            "/usr/pgsql-17/bin/postgresql-17-setup initdb",
             "systemctl enable postgresql-17",
             "systemctl start postgresql-17",
         ]
@@ -179,7 +179,7 @@ def open_external_connections_postgresql(
             return
 
     # Перезагружаем сервер PostgreSQL
-    command = "systemctl restart postgresql"
+    command = "systemctl restart postgresql" if os_type == OsType.DEBIAN else "systemctl restart postgresql-17"
     exit_status, output, error = exec_ssh_command(client, command)
 
     if exit_status != 0:
@@ -224,7 +224,7 @@ def configure_postgresql_student_user(
     pg_hba_path = output
 
     # Проверяем наличие пользователя 'student'
-    command = """sudo -i -u postgres psql -c "SELECT 1 FROM pg_roles WHERE rolname='student';"""
+    command = """sudo -i -u postgres psql -c "SELECT 1 FROM pg_roles WHERE rolname='student';" """
     exit_status, output, error = exec_ssh_command(client, command)
 
     if exit_status != 0:
@@ -243,7 +243,7 @@ def configure_postgresql_student_user(
 
     # Создаем пользователя 'student'
     command = (
-        """sudo -i -u postgres psql -c "CREATE USER student WITH PASSWORD 'student';"""
+        """sudo -i -u postgres psql -c "CREATE USER student WITH PASSWORD 'student';" """
     )
     exit_status, output, error = exec_ssh_command(client, command)
 
@@ -252,7 +252,7 @@ def configure_postgresql_student_user(
         return
 
     # Даем все права пользователю на базу данных 'postgres'
-    command = """sudo -i -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE postgres TO student;"""
+    command = """sudo -i -u postgres psql -c "GRANT ALL PRIVILEGES ON DATABASE postgres TO student;" """
     exit_status, output, error = exec_ssh_command(client, command)
 
     if exit_status != 0:
@@ -261,7 +261,7 @@ def configure_postgresql_student_user(
 
 
     # Перезагружаем сервер PostgreSQL
-    command = "systemctl restart postgresql"
+    command = "systemctl restart postgresql" if os_type == OsType.DEBIAN else "systemctl restart postgresql-17"
     exit_status, output, error = exec_ssh_command(client, command)
 
     if exit_status != 0:
